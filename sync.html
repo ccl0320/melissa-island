@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>小島雲端存檔</title>
+<style>
+  :root { --bg: #fdf7ee; --card: #fff; --ink: #3b3226; --soft: #8a7b66; --line: #eadfcd; --accent: #e8945a; --ok: #3f9a6b; --bad: #c4553b; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.6 system-ui, -apple-system, "PingFang TC", "Noto Sans TC", sans-serif; }
+  main { max-width: 560px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  p.sub { color: var(--soft); margin: 0 0 20px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px; margin-bottom: 16px; }
+  label { display: block; font-weight: 600; margin-bottom: 6px; }
+  textarea, input { width: 100%; font: 14px/1.5 ui-monospace, Menlo, monospace; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: #fffdf9; color: var(--ink); }
+  textarea { min-height: 150px; resize: vertical; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  button { font: inherit; font-weight: 600; border: 0; border-radius: 999px; padding: 10px 18px; background: var(--accent); color: #fff; cursor: pointer; }
+  button.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+  #status { font-weight: 600; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>小島雲端存檔</h1>
+  <p class="sub">這台裝置的同步設定。設定只存在這台裝置的瀏覽器裡，不會放到網站上。</p>
+
+  <div class="card">
+    <div>目前狀態：<span id="status">讀取中…</span></div>
+  </div>
+
+  <div class="card">
+    <label for="cfg">貼上連線設定</label>
+    <textarea id="cfg" placeholder="Firebase：貼上 firebaseConfig 的整段 { apiKey: ..., projectId: ... }&#10;Supabase：第一行貼 Project URL，第二行貼 anon public key"></textarea>
+    <div class="row">
+      <button id="save">儲存並測試</button>
+      <button id="clear" class="ghost">清除這台裝置的設定</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <label>給其他裝置的設定連結</label>
+    <p class="sub" style="margin:0 0 8px">在另一台平板或手機打開這個連結，就會自動設定好同步。連結裡有連線碼，只傳給家人，不要公開貼出去。</p>
+    <input id="link" readonly placeholder="儲存設定後會出現">
+    <div class="row"><button id="copy" class="ghost">複製連結</button></div>
+  </div>
+
+  <p><a href="./">← 回到小島</a></p>
+</main>
+<script>
+const KEY = 'melissa-island:sync';
+const $ = s => document.querySelector(s);
+const read = () => { try { return JSON.parse(localStorage.getItem(KEY)); } catch (e) { return null; } };
+const home = location.href.replace(/sync\.html.*$/, '');
+
+function parse(text) {
+  text = text.trim();
+  if (!text) return null;
+  if (/apiKey/.test(text)) {
+    const body = text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1)
+      .replace(/\/\/.*$/gm, '').replace(/([{,]\s*)([A-Za-z_]\w*)\s*:/g, '$1"$2":').replace(/'/g, '"').replace(/,\s*}/g, '}');
+    const fb = JSON.parse(body);
+    if (!fb.apiKey || !fb.projectId) throw new Error('缺少 apiKey 或 projectId');
+    return { type: 'firebase', firebase: fb };
+  }
+  const parts = text.split(/\s+/);
+  const url = parts.find(p => /^https:\/\/.+supabase\.co/.test(p));
+  const key = parts.find(p => /^eyJ|^sb_publishable_/.test(p));
+  if (!url || !key) throw new Error('看不懂這段設定');
+  return { type: 'supabase', url, key };
+}
+
+async function test(cfg) {
+  if (cfg.type === 'supabase') {
+    const r = await fetch(cfg.url.replace(/\/$/, '') + '/rest/v1/island_docs?select=path&col=eq.profiles', { headers: /^eyJ/.test(cfg.key) ? { apikey: cfg.key, Authorization: 'Bearer ' + cfg.key } : { apikey: cfg.key } });
+    if (!r.ok) throw new Error('Supabase 回應 ' + r.status);
+    return (await r.json()).length;
+  }
+  const p = cfg.firebase.projectId, k = cfg.firebase.apiKey;
+  const r = await fetch(`https://firestore.googleapis.com/v1/projects/${p}/databases/(default)/documents/profiles?key=${k}&pageSize=50`);
+  if (!r.ok) throw new Error('Firebase 回應 ' + r.status);
+  return ((await r.json()).documents || []).length;
+}
+
+async function show() {
+  const cfg = read();
+  $('#link').value = cfg ? home + '#sync=' + encodeURIComponent(btoa(unescape(encodeURIComponent(JSON.stringify(cfg))))) : '';
+  if (!cfg) { $('#status').textContent = '還沒設定，存檔只在這台裝置'; $('#status').className = ''; return; }
+  $('#status').textContent = '連線中…';
+  try { const n = await test(cfg); $('#status').textContent = `✅ 已連上 ${cfg.type === 'firebase' ? 'Firebase' : 'Supabase'}，雲端有 ${n} 座故事島`; $('#status').className = 'ok'; }
+  catch (e) { $('#status').textContent = '⚠️ 連不上：' + e.message; $('#status').className = 'bad'; }
+}
+
+$('#save').onclick = () => {
+  try { const cfg = parse($('#cfg').value); if (!cfg) return; localStorage.setItem(KEY, JSON.stringify(cfg)); $('#cfg').value = ''; show(); }
+  catch (e) { $('#status').textContent = '⚠️ ' + e.message; $('#status').className = 'bad'; }
+};
+$('#clear').onclick = () => { localStorage.removeItem(KEY); show(); };
+$('#copy').onclick = () => { if ($('#link').value) navigator.clipboard.writeText($('#link').value).then(() => { $('#copy').textContent = '已複製'; }); };
+show();
+</script>
+</body>
+</html>
