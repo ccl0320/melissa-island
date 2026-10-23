@@ -42,6 +42,17 @@
   </div>
 
   <div class="card">
+    <label>存檔備份</label>
+    <p class="sub" style="margin:0 0 8px">把存檔檔案（.json）搬進雲端，或把雲端上所有故事島下載成一個備份檔。搬進來的資料會蓋掉雲端上同一個位置的舊資料。</p>
+    <input id="file" type="file" accept=".json,application/json" style="font:inherit;border:0;padding:0;background:none">
+    <div class="row">
+      <button id="import">搬進雲端</button>
+      <button id="export" class="ghost">下載雲端備份</button>
+    </div>
+    <div id="bstatus" style="margin-top:8px"></div>
+  </div>
+
+  <div class="card">
     <label>給其他裝置的設定連結</label>
     <p class="sub" style="margin:0 0 8px">在另一台平板或手機打開這個連結，就會自動設定好同步。連結裡有連線碼，只傳給家人，不要公開貼出去。</p>
     <input id="link" readonly placeholder="儲存設定後會出現">
@@ -54,7 +65,12 @@
 const KEY = 'melissa-island:sync';
 const $ = s => document.querySelector(s);
 const read = () => { try { return JSON.parse(localStorage.getItem(KEY)); } catch (e) { return null; } };
-const home = location.href.replace(/sync\.html.*$/, '');
+const home = location.href.split('#')[0].replace(/sync\.html.*$/, '');
+// a setup link opened on this page: keep the settings, drop them from the address bar
+try {
+  const m = location.hash.match(/[#&]sync=([^&]+)/);
+  if (m) { localStorage.setItem(KEY, decodeURIComponent(escape(atob(decodeURIComponent(m[1]))))); history.replaceState(null, '', location.pathname); }
+} catch (e) {}
 
 function parse(text) {
   text = text.trim();
@@ -100,6 +116,42 @@ $('#save').onclick = () => {
 };
 $('#clear').onclick = () => { localStorage.removeItem(KEY); show(); };
 $('#copy').onclick = () => { if ($('#link').value) navigator.clipboard.writeText($('#link').value).then(() => { $('#copy').textContent = '已複製'; }); };
+function rest(cfg) {
+  const h = { apikey: cfg.key, 'Content-Type': 'application/json' };
+  if (/^eyJ/.test(cfg.key)) h.Authorization = 'Bearer ' + cfg.key;
+  return [cfg.url.replace(/\/$/, '') + '/rest/v1/island_docs', h];
+}
+const bmsg = (t, c = '') => { $('#bstatus').textContent = t; $('#bstatus').className = c; };
+$('#import').onclick = async () => {
+  const cfg = read(), f = $('#file').files[0];
+  if (!cfg || cfg.type !== 'supabase') return bmsg('⚠️ 請先在上面設定 Supabase', 'bad');
+  if (!f) return bmsg('⚠️ 請先選一個存檔檔案', 'bad');
+  try {
+    const rows = JSON.parse(await f.text());
+    if (!Array.isArray(rows) || !rows.every(r => r.path && r.col && r.id && r.data)) throw new Error('這不是小島的存檔檔案');
+    const [url, h] = rest(cfg), now = new Date().toISOString();
+    bmsg('搬運中…');
+    for (let i = 0; i < rows.length; i += 20) {
+      const part = rows.slice(i, i + 20).map(r => ({ path: r.path, col: r.col, id: r.id, data: r.data, updated_at: now }));
+      const r = await fetch(url + '?on_conflict=path', { method: 'POST', headers: Object.assign({ Prefer: 'resolution=merge-duplicates,return=minimal' }, h), body: JSON.stringify(part) });
+      if (!r.ok) throw new Error('Supabase 回應 ' + r.status + ' ' + (await r.text()).slice(0, 120));
+    }
+    bmsg(`✅ 搬好了，共 ${rows.length} 筆資料`, 'ok'); show();
+  } catch (e) { bmsg('⚠️ ' + e.message, 'bad'); }
+};
+$('#export').onclick = async () => {
+  const cfg = read();
+  if (!cfg || cfg.type !== 'supabase') return bmsg('⚠️ 請先在上面設定 Supabase', 'bad');
+  try {
+    const [url, h] = rest(cfg);
+    const r = await fetch(url + '?select=path,col,id,data', { headers: h });
+    if (!r.ok) throw new Error('Supabase 回應 ' + r.status);
+    const rows = await r.json(), a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([JSON.stringify(rows)], { type: 'application/json' }));
+    a.download = 'melissa-island-backup-' + new Date().toISOString().slice(0, 10) + '.json'; a.click();
+    bmsg(`✅ 已下載 ${rows.length} 筆資料`, 'ok');
+  } catch (e) { bmsg('⚠️ ' + e.message, 'bad'); }
+};
 show();
 </script>
 </body>
