@@ -823,7 +823,7 @@ function say(parts, interrupt = true) {
   lastSay = parts;
   if (!prefs.voice || !audio.started) return;
   if (typeof parts === 'string') parts = [{ t: parts }];
-  if (prefs.tts === 'gemini' && gemKey() && audio.ctx && !gem.broken) return gemSay(parts, interrupt);
+  if (((prefs.tts === 'gemini' && gemKey()) || (prefs.tts === 'azure' && azKey())) && audio.ctx && !gem.broken) return gemSay(parts, interrupt);
   browserSay(parts, interrupt);
 }
 function stopSpeech() {
@@ -920,7 +920,7 @@ function gemSay(parts, interrupt) {
   const tok = gem.token;
   const joined = parts.map(p => stripEmoji(p.t).trim()).filter(Boolean).join(' ');
   if (!joined) return;
-  const got = gemAudio(joined);
+  const got = prefs.tts === 'azure' ? azAudio(parts) : gemAudio(joined);
   gem.queue = gem.queue.then(async () => {
     if (tok !== gem.token) return;
     let buf;
@@ -932,6 +932,49 @@ function gemSay(parts, interrupt) {
     }
     if (tok === gem.token) await gemPlay(buf);
   });
+}
+
+/* ---------- optional Azure voice (free F0 tier: 500,000 characters a month); key + region stay in this device's browser storage */
+const LS_AKEY = 'melissa-island:azure-key', LS_AUSE = 'melissa-island:azure-use';
+const AZ_VOICES = [['zh-TW-HsiaoChenNeural', '曉臻・台灣女生，溫柔'], ['zh-TW-HsiaoYuNeural', '曉雨・台灣女生，清亮'], ['zh-TW-YunJheNeural', '雲哲・台灣男生'], ['zh-CN-XiaoshuangNeural', '曉雙・小朋友聲音（大陸腔）'], ['zh-CN-XiaoxiaoNeural', '曉曉・活潑女生（大陸腔）']];
+const AZ_EN = [['en-US-AnaNeural', 'Ana・小朋友聲音'], ['en-US-JennyNeural', 'Jenny・女生'], ['en-US-GuyNeural', 'Guy・男生']];
+let azKeyMem = '';
+const azKey = () => { try { return localStorage.getItem(LS_AKEY) || azKeyMem; } catch (e) { return azKeyMem; } };
+const xmlEsc = t => t.replace(/[<>&'"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' })[c]);
+function azUse(n) {   // rough count of characters sent this calendar month, shown in the settings
+  const m = new Date().toISOString().slice(0, 7);
+  let u = { m, n: 0 }; try { u = JSON.parse(localStorage.getItem(LS_AUSE)) || u; } catch (e) {}
+  if (u.m !== m) u = { m, n: 0 };
+  if (n) { u.n += n; try { localStorage.setItem(LS_AUSE, JSON.stringify(u)); } catch (e) {} }
+  return u.n;
+}
+function azSSML(parts) {
+  const zhV = prefs.azVoice || AZ_VOICES[0][0], enV = prefs.azEn || AZ_EN[0][0], r = Math.round(((prefs.rate || 1) - 1) * 100);
+  const body = parts.map(p => ({ t: stripEmoji(p.t).trim(), en: p.lang === 'en', slow: p.slow })).filter(p => p.t)
+    .map(p => `<voice name="${p.en ? enV : zhV}"><prosody rate="${r + (p.en ? -10 : 0) + (p.slow ? -30 : 0)}%">${xmlEsc(p.t)}</prosody></voice>`).join('');
+  return `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="zh-TW">${body}</speak>`;
+}
+function azAudio(parts) {
+  const ssml = azSSML(parts), key = 'az|' + (prefs.azRegion || '') + '|' + ssml;
+  if (gem.cache.has(key)) return gem.cache.get(key);
+  const p = (async () => {
+    let rec = await idbGet(key);
+    if (!rec) {
+      const region = (prefs.azRegion || 'eastasia').trim().toLowerCase().replace(/\s+/g, '');
+      const r = await fetch(`https://${region}.tts.speech.microsoft.com/cognitiveservices/v1`, {
+        method: 'POST', headers: { 'Ocp-Apim-Subscription-Key': azKey(), 'Content-Type': 'application/ssml+xml', 'X-Microsoft-OutputFormat': 'raw-24khz-16bit-mono-pcm' }, body: ssml,
+      }).catch(() => { throw new Error('連不到 Azure（請確認地區拼字，或這個網頁擋住了連線）'); });
+      if (!r.ok) throw new Error(r.status === 401 ? '金鑰或地區不對（401）' : r.status === 429 ? '這個月的免費額度用完或太頻繁（429）' : r.status === 400 ? '聲音名稱不對（400）' : 'HTTP ' + r.status);
+      rec = pcmRec(new Uint8Array(await r.arrayBuffer()), 24000);
+      azUse(parts.reduce((n, q) => n + stripEmoji(q.t).trim().length, 0));
+      idbPut(key, rec);
+    }
+    gem.fails = 0;
+    return pcmToBuffer(rec);
+  })();
+  gem.cache.set(key, p);
+  p.catch(() => gem.cache.delete(key));
+  return p;
 }
 
 /* ---------- music: recorded acoustic loops (ukulele / kalimba), with the old synth tune as a fallback */
@@ -3578,16 +3621,25 @@ function openSettings() {
 }
 function showSettings() {
   loadVoices();
-  const zh = voicesFor(false), en = voicesFor(true), key = gemKey(), gOn = prefs.tts === 'gemini';
+  const zh = voicesFor(false), en = voicesFor(true), key = gemKey(), gOn = prefs.tts === 'gemini', aOn = prefs.tts === 'azure', akey = azKey();
   const opt = (v, sel) => `<option value="${esc(v.name)}" ${sel && sel.name === v.name ? 'selected' : ''}>${esc(v.name)}（${esc(v.lang)}）</option>`;
   const status = !key ? '還沒有輸入金鑰' : gem.broken ? `❌ 連不上，先用系統聲音（${esc(gem.lastError)}）` : gem.lastError ? `⚠️ 上次錯誤：${esc(gem.lastError)}` : '已存在這台裝置';
   openSheet(head('大人設定', '聲音、說話速度') +
     `<div class="label">${E('🗣️')}說話的聲音</div>
-     <div class="seg" id="ttsSeg"><button class="chip" data-tts="browser" aria-pressed="${!gOn}">裝置內建聲音</button><button class="chip" data-tts="gemini" aria-pressed="${gOn}">Gemini 聲音</button></div>
-     <div id="brBox" ${gOn ? 'hidden' : ''} class="stack">
+     <div class="seg" id="ttsSeg"><button class="chip" data-tts="browser" aria-pressed="${!gOn && !aOn}">裝置內建聲音</button><button class="chip" data-tts="azure" aria-pressed="${aOn}">Azure 聲音</button><button class="chip" data-tts="gemini" aria-pressed="${gOn}">Gemini 聲音</button></div>
+     <div id="brBox" ${gOn || aOn ? 'hidden' : ''} class="stack">
        <div class="field"><span>中文聲音</span>${zh.length ? `<select id="zhSel">${zh.map(v => opt(v, speech.zh)).join('')}</select>` : '<p class="sub">這台裝置找不到中文聲音</p>'}</div>
        <div class="field"><span>英文聲音</span>${en.length ? `<select id="enSel">${en.map(v => opt(v, speech.en)).join('')}</select>` : '<p class="sub">這台裝置找不到英文聲音</p>'}</div>
        <p class="sub">清單已經把比較自然的聲音（Natural、Online、加強版、高品質）排在最前面。<br>iPad／iPhone：到「設定 › 輔助使用 › 朗讀內容 › 聲音 › 中文（台灣）」下載「美佳（加強版）」或高品質版本，回來重新整理就會出現。<br>電腦用 Microsoft Edge 開，會有很自然的「HsiaoChen Online (Natural)」。</p>
+     </div>
+     <div id="aBox" ${aOn ? '' : 'hidden'} class="stack">
+       <div class="field"><span>${E('🔑')}Azure 語音金鑰（只存在這台裝置）</span><input type="password" id="aKey" autocomplete="off" spellcheck="false" placeholder="${akey ? '已儲存，要換再貼新的' : '貼上「金鑰 1」'}"></div>
+       <div class="field"><span>地區（Location/Region）</span><input type="text" id="aRegion" value="${esc(prefs.azRegion || 'eastasia')}" autocomplete="off" spellcheck="false" placeholder="例如 eastasia"></div>
+       <div class="field"><span>中文聲音</span><select id="aVoice">${AZ_VOICES.map(([n, d]) => `<option value="${n}" ${(prefs.azVoice || AZ_VOICES[0][0]) === n ? 'selected' : ''}>${d}</option>`).join('')}</select></div>
+       <div class="field"><span>英文聲音</span><select id="aEn">${AZ_EN.map(([n, d]) => `<option value="${n}" ${(prefs.azEn || AZ_EN[0][0]) === n ? 'selected' : ''}>${d}</option>`).join('')}</select></div>
+       <p class="sub" id="aStat">狀態：${!akey ? '還沒有輸入金鑰' : gem.broken && aOn ? `❌ 連不上，先用系統聲音（${esc(gem.lastError)}）` : '已存在這台裝置'}・這個月這台裝置用了約 ${azUse(0).toLocaleString()} / 500,000 字</p>
+       <p class="sub">免費方案（F0）一個月 50 萬字，用完會暫停，不會扣錢。說過的句子會記在這台裝置，重複的不再算字數。連不上時會自動改用內建聲音。</p>
+       ${akey ? `<button class="chip" id="aClear" style="justify-self:start">🗑️ 刪掉這台裝置上的 Azure 金鑰</button>` : ''}
      </div>
      <div id="gBox" ${gOn ? '' : 'hidden'} class="stack">
        <div class="field"><span>${E('🔑')}Gemini API 金鑰（只存在這台裝置）</span><input type="password" id="gKey" autocomplete="off" spellcheck="false" placeholder="${key ? '已儲存，要換再貼新的' : '貼上 AQ. 或 AIza 開頭的金鑰'}"></div>
@@ -3605,18 +3657,29 @@ function showSettings() {
     prefs.rate = +$('#rate').value; prefs.gVoice = $('#gVoice').value; prefs.gModel = $('#gModel').value.trim() || 'gemini-3.8-flash-tts';
     const kv = k ? k.value.replace(/\s+/g, '') : '';
     if (kv) { gemKeyMem = kv; try { localStorage.setItem(LS_GKEY, kv); } catch (er) {} k.value = ''; gem.broken = false; gem.fails = 0; gem.lastError = ''; }
+    const ak = $('#aKey'), av = ak ? ak.value.replace(/\s+/g, '') : '';
+    if (av) { azKeyMem = av; try { localStorage.setItem(LS_AKEY, av); } catch (er) {} ak.value = ''; gem.broken = false; gem.fails = 0; gem.lastError = ''; }
+    prefs.azRegion = ($('#aRegion').value || 'eastasia').trim(); prefs.azVoice = $('#aVoice').value; prefs.azEn = $('#aEn').value;
     savePrefs(); loadVoices();
   };
   sheet.querySelectorAll('[data-tts]').forEach(b => b.addEventListener('click', () => {
     prefs.tts = b.dataset.tts; savePrefs(); sfx('pop');
     sheet.querySelectorAll('[data-tts]').forEach(x => x.setAttribute('aria-pressed', x === b));
-    $('#brBox').hidden = prefs.tts === 'gemini'; $('#gBox').hidden = prefs.tts !== 'gemini';
+    $('#brBox').hidden = prefs.tts !== 'browser'; $('#gBox').hidden = prefs.tts !== 'gemini'; $('#aBox').hidden = prefs.tts !== 'azure'; gem.broken = false;
   }));
+  const ac = $('#aClear'); if (ac) ac.addEventListener('click', () => { azKeyMem = ''; try { localStorage.removeItem(LS_AKEY); } catch (e) {} prefs.tts = 'browser'; savePrefs(); showSettings(); });
   const gc = $('#gClear'); if (gc) gc.addEventListener('click', () => { gemKeyMem = ''; try { localStorage.removeItem(LS_GKEY); } catch (e) {} prefs.tts = 'browser'; savePrefs(); showSettings(); });
   $('#test').addEventListener('click', async () => {
     store(); gem.broken = false;
     const parts = [{ t: `嗨，我是${S.playerName}的小島，今天想去哪裡玩呢？` }, { t: 'apple', lang: 'en' }];
     if (prefs.tts === 'gemini' && !gemKey()) { $('#gStat').textContent = '狀態：❌ 還沒有金鑰，請先把金鑰貼進上面的格子'; return; }
+    if (prefs.tts === 'azure') {
+      if (!azKey()) { $('#aStat').textContent = '狀態：❌ 還沒有金鑰，請先把金鑰貼進上面的格子'; return; }
+      $('#aStat').textContent = '狀態：連線中…';
+      try { const buf = await azAudio(parts); stopSpeech(); gemPlay(buf); $('#aStat').textContent = `狀態：✅ 成功！這個月約用了 ${azUse(0).toLocaleString()} 字`; }
+      catch (e) { gem.lastError = e.message || String(e); $('#aStat').textContent = `狀態：❌ ${gem.lastError}（會先用內建聲音）`; browserSay(parts, true); }
+      return;
+    }
     if (prefs.tts === 'gemini') {
       $('#gStat').textContent = '狀態：連線中…';
       try { const buf = await gemAudio(parts.map(p => p.t).join(' ')); stopSpeech(); gemPlay(buf); $('#gStat').textContent = '狀態：✅ 成功！'; }
