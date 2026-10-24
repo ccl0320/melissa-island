@@ -19,7 +19,19 @@
 
   let cfg = null;
   try { cfg = JSON.parse(localStorage.getItem(KEY)); } catch (e) {}
-  if (!cfg || !cfg.type) return; // no cloud: the game keeps its saves in this browser only
+  // a small note in the corner so a grown-up can tell whether this device syncs; tapping it opens sync.html
+  function badge(text, warn, ms) {
+    const show = () => {
+      const a = document.createElement('a');
+      a.href = 'sync.html'; a.textContent = text;
+      a.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);bottom:calc(10px + env(safe-area-inset-bottom));z-index:99999;padding:6px 14px;border-radius:999px;font:600 13px system-ui,sans-serif;text-decoration:none;box-shadow:0 2px 8px rgba(0,0,0,.15);transition:opacity .6s;' +
+        (warn ? 'background:#fff3e6;color:#a4501f;' : 'background:rgba(255,255,255,.92);color:#2f7a55;');
+      document.body.appendChild(a);
+      setTimeout(() => { a.style.opacity = '0'; setTimeout(() => a.remove(), 700); }, ms);
+    };
+    if (document.body) show(); else document.addEventListener('DOMContentLoaded', show);
+  }
+  if (!cfg || !cfg.type) { badge('\ud83d\udcf1 \u5b58\u6a94\u53ea\u5728\u9019\u53f0\u88dd\u7f6e \u00b7 \u9ede\u9019\u88e1\u8a2d\u5b9a\u96f2\u7aef\u540c\u6b65', true, 12000); return; } // no cloud: saves stay in this browser
 
   const loadScript = src => new Promise((ok, bad) => { const s = document.createElement('script'); s.src = src; s.onload = ok; s.onerror = bad; document.head.appendChild(s); });
 
@@ -93,7 +105,12 @@
   }
 
   let dbPromise = null;
-  const getDb = () => dbPromise || (dbPromise = cfg.type === 'firebase' ? firebaseDb() : supabaseDb());
+  const getDb = () => dbPromise || (dbPromise = (async () => {
+    const db = cfg.type === 'firebase' ? await firebaseDb() : supabaseDb();
+    try { await db.collection('profiles').get(); badge('\u2601\ufe0f \u96f2\u7aef\u5b58\u6a94\u5df2\u9023\u4e0a', false, 4000); }
+    catch (e) { badge('\u26a0\ufe0f \u9023\u4e0d\u4e0a\u96f2\u7aef\u5b58\u6a94\uff0c\u9032\u5ea6\u5148\u5b58\u5728\u9019\u53f0 \u00b7 \u9ede\u9019\u88e1\u6aa2\u67e5', true, 12000); throw e; }
+    return db;
+  })());
   window.claude = {
     use: async name => {
       if (name !== 'db') throw new Error('not available on this site: ' + name); // photos stay inside the journal entry

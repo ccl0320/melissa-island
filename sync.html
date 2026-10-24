@@ -34,7 +34,7 @@
 
   <div class="card">
     <label for="cfg">貼上連線設定</label>
-    <textarea id="cfg" placeholder="Firebase：貼上 firebaseConfig 的整段 { apiKey: ..., projectId: ... }&#10;Supabase：第一行貼 Project URL，第二行貼 anon public key"></textarea>
+    <textarea id="cfg" placeholder="Firebase：貼上 firebaseConfig 的整段 { apiKey: ..., projectId: ... }&#10;Supabase：貼上整個設定連結，或第一行貼 Project URL、第二行貼 key"></textarea>
     <div class="row">
       <button id="save">儲存並測試</button>
       <button id="clear" class="ghost">清除這台裝置的設定</button>
@@ -75,6 +75,8 @@ try {
 function parse(text) {
   text = text.trim();
   if (!text) return null;
+  const link = text.match(/#sync=([^&\s]+)/); // a whole setup link pasted in
+  if (link) return JSON.parse(decodeURIComponent(escape(atob(decodeURIComponent(link[1])))));
   if (/apiKey/.test(text)) {
     const body = text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1)
       .replace(/\/\/.*$/gm, '').replace(/([{,]\s*)([A-Za-z_]\w*)\s*:/g, '$1"$2":').replace(/'/g, '"').replace(/,\s*}/g, '}');
