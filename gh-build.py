@@ -19,6 +19,10 @@ patch("if (el && el.textContent.length > 100) {", "if (el && el.dataset.src) u =
 patch('<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>',
       '<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>\n<script src="sync.js"></script>')
 
+# the source is a claude.ai artifact body (the artifact host adds the document skeleton); add doctype + charset for a standalone page
+if not h.lstrip().lower().startswith('<!doctype'):
+    h = '<!doctype html>\n<html lang="zh-Hant">\n<meta charset="utf-8">\n' + h.lstrip()
+
 os.makedirs(out, exist_ok=True)
 tags = ''
 songs = [('Sunny Hillside Sprint', 'Sunny_Hillside_Sprint'), ('Button Mash Morning', 'Button_Mash_Morning'), ('Morning High Score', 'Morning_High_Score'), ('Pocket Kingdom Shuffle', 'Pocket_Kingdom_Shuffle')]
